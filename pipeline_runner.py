@@ -216,17 +216,31 @@ def merge_data(insights, adsets, campaigns, ads):
 
 # ---------------- PIPELINE ----------------
 
-def run_pipeline_for_accounts(accounts, token, days_back, pipeline_name, progress_callback=None):
+def run_pipeline_for_accounts(
+    accounts,
+    token,
+    days_back,
+    pipeline_name,
+    progress_callback=None
+):
 
     start_date, end_date = get_date_range(days_back)
-    output_file = get_output_file(pipeline_name, start_date, end_date)
+
+    output_file = get_output_file(
+        pipeline_name,
+        start_date,
+        end_date
+    )
 
     if os.path.exists(output_file):
         os.remove(output_file)
 
+    all_dfs = []
+
     for i, acc in enumerate(accounts, 1):
 
         if progress_callback:
+
             progress_callback({
                 "pipeline": pipeline_name,
                 "current": i,
@@ -234,34 +248,86 @@ def run_pipeline_for_accounts(accounts, token, days_back, pipeline_name, progres
                 "account": acc
             })
 
-        insights = fetch_insights(acc, token, start_date, end_date)
+        insights = fetch_insights(
+            acc,
+            token,
+            start_date,
+            end_date
+        )
+
         adsets = fetch_adsets(acc, token)
+
         campaigns = fetch_campaigns(acc, token)
+
         ads = fetch_ads(acc, token)
 
-        final_rows = merge_data(insights, adsets, campaigns, ads)
+        final_rows = merge_data(
+            insights,
+            adsets,
+            campaigns,
+            ads
+        )
 
         if final_rows:
+
             df = pd.DataFrame(final_rows)
 
+            all_dfs.append(df)
+
             if not os.path.exists(output_file):
-                df.to_csv(output_file, index=False)
+
+                df.to_csv(
+                    output_file,
+                    index=False
+                )
+
             else:
-                df.to_csv(output_file, mode="a", header=False, index=False)
+
+                df.to_csv(
+                    output_file,
+                    mode="a",
+                    header=False,
+                    index=False
+                )
+
+    if all_dfs:
+
+        final_df = pd.concat(
+            all_dfs,
+            ignore_index=True
+        )
+
+        return final_df
+
+    return pd.DataFrame()
 
 # ---------------- SINGLE ----------------
 
-def run_single_pipeline(pipeline_name, days_back, progress_callback=None):
+def run_single_pipeline(
+    pipeline_name,
+    days_back,
+    progress_callback=None
+):
 
-    pipelines = json.load(open("pipelines.json"))
+    pipelines = json.load(
+        open("pipelines.json")
+    )
 
-    p = next((x for x in pipelines if x["name"] == pipeline_name), None)
+    p = next(
+        (
+            x for x in pipelines
+            if x["name"] == pipeline_name
+        ),
+        None
+    )
 
     if not p:
-        print("❌ Pipeline not found")
-        return
 
-    run_pipeline_for_accounts(
+        print("❌ Pipeline not found")
+
+        return pd.DataFrame()
+
+    final_df = run_pipeline_for_accounts(
         p["accounts"],
         p["access_token"],
         days_back,
@@ -269,14 +335,24 @@ def run_single_pipeline(pipeline_name, days_back, progress_callback=None):
         progress_callback
     )
 
+    return final_df
+
 # ---------------- ALL ----------------
 
-def run_all_pipelines(days_back, progress_callback=None):
+def run_all_pipelines(
+    days_back,
+    progress_callback=None
+):
 
-    pipelines = json.load(open("pipelines.json"))
+    pipelines = json.load(
+        open("pipelines.json")
+    )
+
+    all_results = []
 
     def run(p):
-        run_pipeline_for_accounts(
+
+        df = run_pipeline_for_accounts(
             p["accounts"],
             p["access_token"],
             days_back,
@@ -284,5 +360,26 @@ def run_all_pipelines(days_back, progress_callback=None):
             progress_callback
         )
 
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-        executor.map(run, pipelines)
+        return df
+
+    with ThreadPoolExecutor(
+        max_workers=MAX_WORKERS
+    ) as executor:
+
+        results = executor.map(run, pipelines)
+
+        for r in results:
+
+            if r is not None and not r.empty:
+                all_results.append(r)
+
+    if all_results:
+
+        final_df = pd.concat(
+            all_results,
+            ignore_index=True
+        )
+
+        return final_df
+
+    return pd.DataFrame()
