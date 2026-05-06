@@ -1,8 +1,8 @@
 import streamlit as st
-import json, os, pandas as pd, requests, threading, signal
-import numpy as np
+import json, os, pandas as pd, requests, threading, signal, numpy as np
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+
+from google.oauth2.service_account import Credentials
 
 from scheduler import scheduler_loop
 from pipeline_runner import run_single_pipeline, run_all_pipelines
@@ -26,26 +26,26 @@ def save(file, data):
 # ---------------- GOOGLE SHEETS EXPORT ----------------
 def export_to_gsheet_append(df, sheet_url, sheet_name):
 
-    # -------- CLEAN DATA (FIX JSON ERROR) --------
     df = df.replace([np.inf, -np.inf], np.nan)
-    df = df.fillna("")               # remove NaN
-    df = df.astype(str)              # make everything string-safe
+    df = df.fillna("")
+    df = df.astype(str)
 
-    # -------- AUTH --------
     scope = [
-        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive"
     ]
 
-    creds = ServiceAccountCredentials.from_json_keyfile_name(
-        "credentials.json", scope
+    creds_dict = dict(st.secrets["gcp_service_account"])
+
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scope
     )
 
     client = gspread.authorize(creds)
 
     spreadsheet = client.open_by_url(sheet_url)
 
-    # -------- SHEET HANDLING --------
     try:
         worksheet = spreadsheet.worksheet(sheet_name)
     except:
@@ -57,7 +57,6 @@ def export_to_gsheet_append(df, sheet_url, sheet_name):
 
     existing = worksheet.get_all_values()
 
-    # -------- WRITE --------
     if not existing:
         worksheet.append_rows(
             [df.columns.tolist()] + df.values.tolist()
@@ -68,13 +67,22 @@ def export_to_gsheet_append(df, sheet_url, sheet_name):
 # ---------------- FETCH ACCOUNTS ----------------
 @st.cache_data(ttl=3600)
 def get_accounts(token):
+
     url = "https://graph.facebook.com/v18.0/me/adaccounts"
-    params = {"access_token": token, "fields": "id,name,account_id", "limit": 200}
+
+    params = {
+        "access_token": token,
+        "fields": "id,name,account_id",
+        "limit": 200
+    }
 
     acc = []
+
     while url:
         d = requests.get(url, params=params).json()
+
         acc += d.get("data", [])
+
         url = d.get("paging", {}).get("next")
         params = None
 
@@ -100,46 +108,88 @@ if st.button("Fetch Accounts"):
     st.session_state["accounts"] = get_accounts(token)
 
 accounts = st.session_state.get("accounts", [])
-options = {f"{a['name']} ({a['account_id']})": a["id"] for a in accounts}
 
-selected = st.multiselect("Accounts", list(options.keys()))
+options = {
+    f"{a['name']} ({a['account_id']})": a["id"]
+    for a in accounts
+}
+
+selected = st.multiselect(
+    "Accounts",
+    list(options.keys())
+)
+
 selected_ids = [options[s] for s in selected]
 
-if st.button("Save"):
+if st.button("Save Pipeline"):
+
     p = load(PIPELINE_FILE)
+
     p = [x for x in p if x["name"] != name]
-    p.append({"name": name, "access_token": token, "accounts": selected_ids})
+
+    p.append({
+        "name": name,
+        "access_token": token,
+        "accounts": selected_ids
+    })
+
     save(PIPELINE_FILE, p)
+
     st.success("Saved")
 
 # ---------------- RUN ----------------
 pipelines = load(PIPELINE_FILE)
+
 names = [p["name"] for p in pipelines]
 
-selected_pipeline = st.selectbox("Pipeline", names, key="runp")
-range_opt = st.selectbox("Range", ["Today", "Yesterday", "5", "7", "10"], key="runr")
+selected_pipeline = st.selectbox(
+    "Pipeline",
+    names
+)
 
-def mapd(x): 
-    return {"Today": 0, "Yesterday": 1, "5": 5, "7": 7, "10": 10}[x]
+range_opt = st.selectbox(
+    "Range",
+    ["Today", "Yesterday", "5", "7", "10"]
+)
 
-def progress(d): 
+def mapd(x):
+    return {
+        "Today": 0,
+        "Yesterday": 1,
+        "5": 5,
+        "7": 7,
+        "10": 10
+    }[x]
+
+def progress(d):
     st.session_state["progress"] = d
 
 col1, col2 = st.columns(2)
 
 with col1:
     if st.button("Run Selected"):
-        run_single_pipeline(selected_pipeline, mapd(range_opt), progress)
+        run_single_pipeline(
+            selected_pipeline,
+            mapd(range_opt),
+            progress
+        )
 
 with col2:
     if st.button("Run ALL"):
-        run_all_pipelines(mapd(range_opt), progress)
+        run_all_pipelines(
+            mapd(range_opt),
+            progress
+        )
 
 # ---------------- PROGRESS ----------------
 p = st.session_state["progress"]
+
 if p:
     st.write(p)
-    st.progress(p["current"] / p["total"])
+
+    st.progress(
+        p["current"] / max(p["total"], 1)
+    )
 
 # ---------------- FILES ----------------
 st.header("Files")
@@ -154,27 +204,53 @@ st.header("Preview")
 
 if files:
 
-    file = st.selectbox("Select File", files, key="file")
+    file = st.selectbox(
+        "Select File",
+        files
+    )
 
-    df = pd.read_csv(os.path.join(OUTPUT_DIR, file), dtype=str)
+    df = pd.read_csv(
+        os.path.join(OUTPUT_DIR, file),
+        dtype=str
+    )
 
     st.write(f"Total Rows: {len(df)}")
 
-    st.dataframe(df, use_container_width=True, height=400)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        height=400
+    )
 
-    # ---------------- EXPORT ----------------
+    # ---------------- DOWNLOAD ----------------
+    st.subheader("Download CSV")
+
+    csv_data = df.to_csv(index=False).encode("utf-8")
+
+    st.download_button(
+        label="Download CSV File",
+        data=csv_data,
+        file_name=file,
+        mime="text/csv"
+    )
+
+    # ---------------- GOOGLE SHEETS ----------------
     st.subheader("Export to Google Sheets")
 
     sheet_url = st.text_input("Google Sheet URL")
-    sheet_name = st.text_input("Sheet Name (Tab)")
 
-    if st.button("Export"):
+    sheet_name = st.text_input("Sheet Name")
 
-        if not sheet_url or not sheet_name:
-            st.error("Enter URL and Sheet Name")
-        else:
-            try:
-                export_to_gsheet_append(df, sheet_url, sheet_name)
-                st.success("✅ Data appended successfully")
-            except Exception as e:
-                st.error(f"❌ Error: {e}")
+    if st.button("Export to Sheets"):
+
+        try:
+            export_to_gsheet_append(
+                df,
+                sheet_url,
+                sheet_name
+            )
+
+            st.success("Data exported")
+
+        except Exception as e:
+            st.error(str(e))
